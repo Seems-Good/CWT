@@ -24,6 +24,7 @@ local SPELL_COACHING = 389581   -- "Coaching" buff (1 hr, applied when you use t
 local TRINKET_SLOT_1 = 13
 local TRINKET_SLOT_2 = 14
 local WARN_THRESHOLD = 300      -- warn when buff has < 5 min left
+local SOUND_ID       = 204190   -- https://www.wowhead.com/sound=204190/fx-slidewhistle-down-short02
 
 -- Pulse
 local _sin         = math.sin
@@ -357,7 +358,7 @@ end)
 -- ============================================================
 --  Slash commands
 -- ============================================================
-SLASH_COACHSWHISTLETRACKER1 = "/cwt"
+SLASH_CWT1 = "/cwt"
 SlashCmdList["CWT"] = function(msg)
     local cmd = strtrim(msg or ""):lower()
 

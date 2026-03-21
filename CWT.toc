@@ -3,7 +3,7 @@
 ## Title: CWT - Coach's Whistle Tracker
 ## Notes: Pulsing reminder to use your Emerald Coach's Whistle when out of combat without the Coaching buff.
 ## Author: Jeremy-Gstein
-## IconTexture: Interface\Icons\inv_misc_whistle_color1
+## IconTexture: Interface\Icons\inv_misc_head_dragon_green
 ## SavedVariables: CWTDB
 
 Locale/enUS.lua
