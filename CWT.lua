@@ -37,7 +37,6 @@ local PULSE_FADE_IN  = 0.55
 --  All fields updated by events; OnUpdate only reads warnActive.
 -- ============================================================
 local whistleEquipped  = false
-local inCombat         = false
 local inGroup          = false
 local coachingExpiry   = 0      -- GetTime() value when Coaching buff expires, 0 = no buff
 local previewMode      = false
@@ -49,17 +48,13 @@ local function RefreshEquipped()
         GetInventoryItemID("player", TRINKET_SLOT_2) == ITEM_ID
 end
 
--- Scans auras once per event, caches the expiry timestamp.
+-- Looks up the Coaching buff directly by spell ID — no iteration, no taint.
 -- Returns remaining seconds (for timer scheduling).
 local function RefreshCoachingAura()
-    for i = 1, 40 do
-        local data = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
-        if not data then break end
-        if data.spellId == SPELL_COACHING then
-            coachingExpiry = (data.expirationTime and data.expirationTime > 0)
-                             and data.expirationTime or 0
-            return coachingExpiry > 0 and math.max(0, coachingExpiry - GetTime()) or 0
-        end
+    local data = C_UnitAuras.GetPlayerAuraBySpellID(SPELL_COACHING)
+    if data and data.expirationTime and data.expirationTime > 0 then
+        coachingExpiry = data.expirationTime
+        return math.max(0, coachingExpiry - GetTime())
     end
     coachingExpiry = 0
     return 0
@@ -70,7 +65,6 @@ local warnActive = false
 
 local function UpdateWarnActive()
     if not whistleEquipped then warnActive = false; return end
-    if inCombat            then warnActive = false; return end
     if not inGroup         then warnActive = false; return end
     -- Use cached expiry: no API call
     local rem = coachingExpiry > 0 and math.max(0, coachingExpiry - GetTime()) or 0
@@ -279,7 +273,6 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 
     -- ── Login: inventory ready ───────────────────────────────
     if event == "PLAYER_LOGIN" then
-        inCombat = InCombatLockdown()
         inGroup  = IsInGroup()
         RefreshEquipped()
         -- Delay slightly so auras are fully populated before we check
@@ -293,14 +286,12 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 
     -- ── Zone change / reload UI ──────────────────────────────
     if event == "PLAYER_ENTERING_WORLD" then
-        inCombat = false
         inGroup  = false
         coachingExpiry = 0
         warnActive = false
         CancelExpiryTimer()
         HideWarning()
         C_Timer.After(1.5, function()
-            inCombat = InCombatLockdown()
             inGroup  = IsInGroup()
             RefreshEquipped()
             RefreshCoachingAura()
@@ -317,7 +308,6 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
 
     -- ── Entered combat ───────────────────────────────────────
     if event == "PLAYER_REGEN_DISABLED" then
-        inCombat = true
         CancelExpiryTimer()
         HideWarning()
         return
@@ -339,10 +329,6 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     end
 
     -- ── Left combat ──────────────────────────────────────────
-    if event == "PLAYER_REGEN_ENABLED" then
-        inCombat = false
-    end
-
     -- ── Group change — debounced ──────────────────────────────
     if event == "GROUP_ROSTER_UPDATE" then
         inGroup = IsInGroup()
@@ -373,7 +359,7 @@ SlashCmdList["CWT"] = function(msg)
         local rem = CoachingRemaining()
         print("|cffff9900[CWT Debug]|r " .. L.DBG_HEADER)
         print(L.DBG_EQUIPPED .. tostring(whistleEquipped))
-        print(L.DBG_COMBAT .. tostring(inCombat))
+        print(L.DBG_COMBAT .. tostring(InCombatLockdown()))
         print(L.DBG_REMAINING .. string.format("%.0f", rem) .. L.DBG_REMAINING_UNIT)
         print(L.DBG_WARN .. tostring(warnActive))
         print(L.DBG_VISIBLE .. tostring(CWT:IsShown()))
