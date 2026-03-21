@@ -24,18 +24,13 @@ local SPELL_COACHING = 389581   -- "Coaching" buff (1 hr, applied when you use t
 local TRINKET_SLOT_1 = 13
 local TRINKET_SLOT_2 = 14
 local WARN_THRESHOLD = 300      -- warn when buff has < 5 min left
-local SOUND_ID       = 204190   -- https://www.wowhead.com/sound=204190/fx-slidewhistle-down-short02
+local SOUNDKIT_ID    = 204190
 
--- Pulse
-local _sin         = math.sin
-local _pi2         = math.pi * 2
-local PULSE_PERIOD = 1.4
-local ALPHA_MIN    = 0.25
-local ALPHA_MAX    = 1.00
-local ALPHA_MID    = (ALPHA_MAX + ALPHA_MIN) / 2
-local ALPHA_AMP    = (ALPHA_MAX - ALPHA_MIN) / 2
-local PHASE_OFFSET = math.pi / 2
-local pulseTime    = 0
+-- Pulse durations for the AnimationGroup (runs C++-side, zero Lua per frame)
+local ALPHA_MAX      = 1.00
+local ALPHA_MIN      = 0.25
+local PULSE_FADE_OUT = 0.55
+local PULSE_FADE_IN  = 0.55
 
 -- ============================================================
 --  Cached state  — NEVER read inside OnUpdate
@@ -110,31 +105,33 @@ label:SetJustifyV("MIDDLE")
 label:SetText(L.WARNING_TEXT)
 
 -- ============================================================
---  Pulse  (OnUpdate alpha-only, self-terminating)
+--  Pulse  — AnimationGroup (pure C++, zero Lua per frame)
 -- ============================================================
--- OnUpdate: pure arithmetic only. No API calls, no table allocations.
--- warnActive is set by events via UpdateWarnActive(). OnUpdate just reads it.
-local function onUpdate(self, elapsed)
-    if not previewMode and not warnActive then
-        CWT:Hide()
-        return
-    end
-    pulseTime = (pulseTime + elapsed) % PULSE_PERIOD
-    self:SetAlpha(ALPHA_MID + ALPHA_AMP * _sin(
-        pulseTime * _pi2 / PULSE_PERIOD + PHASE_OFFSET))
-end
+local pulse = CWT:CreateAnimationGroup()
+pulse:SetLooping("REPEAT")
+
+local fadeOut = pulse:CreateAnimation("Alpha")
+fadeOut:SetFromAlpha(ALPHA_MAX)
+fadeOut:SetToAlpha(ALPHA_MIN)
+fadeOut:SetDuration(PULSE_FADE_OUT)
+fadeOut:SetOrder(1)
+fadeOut:SetSmoothing("IN_OUT")
+
+local fadeIn = pulse:CreateAnimation("Alpha")
+fadeIn:SetFromAlpha(ALPHA_MIN)
+fadeIn:SetToAlpha(ALPHA_MAX)
+fadeIn:SetDuration(PULSE_FADE_IN)
+fadeIn:SetOrder(2)
+fadeIn:SetSmoothing("IN_OUT")
 
 CWT:SetScript("OnShow", function(self)
-    pulseTime = 0
-    -- Play a sharp whistle alert. 621. is SOUNDKIT.RAID_WARNING which is
-    -- a recognisable short alert horn. 8959 is the in-game whistle sound.
-    PlaySound(8959, "Master")
-    self:SetScript("OnUpdate", onUpdate)
+    PlaySound(SOUNDKIT_ID, "Master")
+    pulse:Play()
 end)
 
 CWT:SetScript("OnHide", function(self)
-    self:SetScript("OnUpdate", nil)
-    self:SetAlpha(1)
+    pulse:Stop()
+    self:SetAlpha(ALPHA_MAX)
     previewMode = false
 end)
 
