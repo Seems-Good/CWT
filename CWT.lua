@@ -1,372 +1,350 @@
--- CWT.lua
--- CWT - Coach's Whistle Tracker
+-- CWT.lua  —  CWT - Coach's Whistle Tracker
 --
 -- Shows "USE COACH'S WHISTLE" when:
---   • Emerald Coach's Whistle is equipped in trinket slot 13 or 14
---   • Player is NOT in combat
---   • Player does NOT have the Coaching buff, OR it has < 5 min remaining
+--   • Emerald Coach's Whistle equipped in trinket slot 13 or 14
+--   • NOT in combat
+--   • In a group or raid
+--   • No Coaching buff (or buff expiring in < 5 min)
 --
--- Right-click  : toggle lock/unlock (also stops the /cwt config preview)
--- Left-click   : drag to move (only when unlocked)
+-- A 2-second ticker drives all show/hide logic.
+-- onUpdate runs ONLY while the frame is visible and does pure alpha math.
 --
--- /cwt config  : show the warning as a preview so you can drag it into place,
---                then right-click to lock when happy
--- /cwt debug   : print current state to chat
-
-local addonName, addon = ...
-local L = addon.L
+-- /cwt          — show/hide commands
+-- /cwt debug    — print state
+-- /cwt config   — open settings to reposition
 
 -- ============================================================
---  Constants
+--  Config
 -- ============================================================
 local ITEM_ID        = 193718   -- Emerald Coach's Whistle
-local SPELL_COACHING = 389581   -- "Coaching" buff (1 hr, applied when you use the trinket)
-local TRINKET_SLOT_1 = 13
-local TRINKET_SLOT_2 = 14
-local WARN_THRESHOLD = 300      -- warn when buff has < 5 min left
-local SOUNDKIT_ID    = 204190
+local SPELL_COACHING = 389581   -- Coaching buff
+local TRINKET_1      = 13
+local TRINKET_2      = 14
+local WARN_SECS      = 300      -- warn if buff < 5 min remaining
+local TICK_INTERVAL  = 2        -- how often to re-check conditions (seconds)
+local SOUND_ID       = 204190   -- slide whistle
 
--- Pulse durations for the AnimationGroup (runs C++-side, zero Lua per frame)
-local ALPHA_MAX      = 1.00
-local ALPHA_MIN      = 0.25
-local PULSE_FADE_OUT = 0.55
-local PULSE_FADE_IN  = 0.55
+-- Pulse settings
+local _sin         = math.sin
+local _pi2         = math.pi * 2
+local PULSE_PERIOD = 1.4
+local ALPHA_LO     = 0.25
+local ALPHA_HI     = 1.00
+local ALPHA_MID    = (ALPHA_HI + ALPHA_LO) / 2
+local ALPHA_AMP    = (ALPHA_HI - ALPHA_LO) / 2
+local pulseTime    = 0
 
 -- ============================================================
---  Cached state  — NEVER read inside OnUpdate
---  All fields updated by events; OnUpdate only reads warnActive.
+--  Condition — single source of truth, called every tick
 -- ============================================================
-local whistleEquipped  = false
-local inGroup          = false
-local coachingExpiry   = 0      -- GetTime() value when Coaching buff expires, 0 = no buff
-local previewMode      = false
-
--- Called from events only — no Lua table allocation here.
-local function RefreshEquipped()
-    whistleEquipped =
-        GetInventoryItemID("player", TRINKET_SLOT_1) == ITEM_ID or
-        GetInventoryItemID("player", TRINKET_SLOT_2) == ITEM_ID
+local function WhistleEquipped()
+    return GetInventoryItemID("player", TRINKET_1) == ITEM_ID
+        or GetInventoryItemID("player", TRINKET_2) == ITEM_ID
 end
 
--- Looks up the Coaching buff directly by spell ID — no iteration, no taint.
--- Returns remaining seconds (for timer scheduling).
-local function RefreshCoachingAura()
+local function CoachingBuffOK()
+    -- Returns true if buff is active with >= WARN_SECS remaining
     local data = C_UnitAuras.GetPlayerAuraBySpellID(SPELL_COACHING)
-    if data and data.expirationTime and data.expirationTime > 0 then
-        coachingExpiry = data.expirationTime
-        return math.max(0, coachingExpiry - GetTime())
+    if not data then return false end
+    if not data.expirationTime or data.expirationTime == 0 then
+        -- Permanent / infinite buff (shouldn't happen but handle it)
+        return true
     end
-    coachingExpiry = 0
-    return 0
+    return (data.expirationTime - GetTime()) >= WARN_SECS
 end
 
--- Read by OnUpdate — pure boolean, zero API calls, zero allocations.
-local warnActive = false
-
-local function UpdateWarnActive()
-    if not whistleEquipped then warnActive = false; return end
-    if not inGroup         then warnActive = false; return end
-    -- Use cached expiry: no API call
-    local rem = coachingExpiry > 0 and math.max(0, coachingExpiry - GetTime()) or 0
-    warnActive = (rem == 0 or rem < WARN_THRESHOLD)
-end
-
--- Legacy wrapper used by a few callsites
-local function CoachingRemaining()
-    return coachingExpiry > 0 and math.max(0, coachingExpiry - GetTime()) or 0
+local function ShouldWarn()
+    if not WhistleEquipped()  then return false end
+    if InCombatLockdown()     then return false end
+    if not IsInGroup()        then return false end
+    if CoachingBuffOK()       then return false end
+    return true
 end
 
 -- ============================================================
---  Warning frame
+--  Frame
 -- ============================================================
-local CWT = CreateFrame("Frame", "CWTFrame", UIParent)
-CWT:SetSize(900, 100)
-CWT:SetFrameStrata("HIGH")
-CWT:SetFrameLevel(100)
-CWT:SetMovable(true)
-CWT:EnableMouse(true)
-CWT:RegisterForDrag("LeftButton")
-CWT:Hide()
+local frame = CreateFrame("Frame", "CWTFrame", UIParent)
+frame:SetSize(900, 100)
+frame:SetFrameStrata("HIGH")
+frame:SetFrameLevel(100)
+frame:Hide()
 
-local label = CWT:CreateFontString(nil, "OVERLAY")
-label:SetAllPoints(CWT)
+local label = frame:CreateFontString(nil, "OVERLAY")
+label:SetAllPoints(frame)
 label:SetFont("Fonts\\FRIZQT__.TTF", 46, "OUTLINE")
 label:SetTextColor(1, 0.15, 0.15, 1)
 label:SetShadowColor(0, 0, 0, 1)
 label:SetShadowOffset(2, -2)
 label:SetJustifyH("CENTER")
 label:SetJustifyV("MIDDLE")
-label:SetText(L.WARNING_TEXT)
+label:SetText("USE COACH'S WHISTLE")
 
 -- ============================================================
---  Pulse  — AnimationGroup (pure C++, zero Lua per frame)
+--  Pulse  (only runs while frame is visible)
 -- ============================================================
-local pulse = CWT:CreateAnimationGroup()
-pulse:SetLooping("REPEAT")
-
-local fadeOut = pulse:CreateAnimation("Alpha")
-fadeOut:SetFromAlpha(ALPHA_MAX)
-fadeOut:SetToAlpha(ALPHA_MIN)
-fadeOut:SetDuration(PULSE_FADE_OUT)
-fadeOut:SetOrder(1)
-fadeOut:SetSmoothing("IN_OUT")
-
-local fadeIn = pulse:CreateAnimation("Alpha")
-fadeIn:SetFromAlpha(ALPHA_MIN)
-fadeIn:SetToAlpha(ALPHA_MAX)
-fadeIn:SetDuration(PULSE_FADE_IN)
-fadeIn:SetOrder(2)
-fadeIn:SetSmoothing("IN_OUT")
-
-CWT:SetScript("OnShow", function(self)
-    PlaySound(SOUNDKIT_ID, "Master")
-    pulse:Play()
+frame:SetScript("OnShow", function(self)
+    pulseTime = 0
+    PlaySound(SOUND_ID, "Master")
+    self:SetScript("OnUpdate", function(_, elapsed)
+        pulseTime = (pulseTime + elapsed) % PULSE_PERIOD
+        frame:SetAlpha(ALPHA_MID + ALPHA_AMP * _sin(
+            pulseTime * _pi2 / PULSE_PERIOD + (math.pi / 2)))
+    end)
 end)
 
-CWT:SetScript("OnHide", function(self)
-    pulse:Stop()
-    self:SetAlpha(ALPHA_MAX)
-    previewMode = false
+frame:SetScript("OnHide", function(self)
+    self:SetScript("OnUpdate", nil)
+    self:SetAlpha(ALPHA_HI)
 end)
-
--- ============================================================
---  Drag
--- ============================================================
-CWT:SetScript("OnDragStart", function(self)
-    if CWTDB and CWTDB.locked then return end
-    if InCombatLockdown() then return end
-    self:StartMoving()
-end)
-
-CWT:SetScript("OnDragStop", function(self)
-    self:StopMovingOrSizing()
-    if CWTDB then
-        local x, y   = self:GetCenter()
-        local cx, cy = UIParent:GetCenter()
-        CWTDB.posX = x - cx
-        CWTDB.posY = y - cy
-    end
-end)
-
--- ============================================================
---  Right-click: lock / unlock
--- ============================================================
-CWT:SetScript("OnMouseUp", function(self, btn)
-    if btn ~= "RightButton" then return end
-    if not CWTDB then return end
-    local db = CWTDB
-    db.locked = not db.locked
-    if db.locked then
-        -- Locking ends the config preview
-        previewMode = false
-        warnActive = false
-        CWT:Hide()
-        print("|cffff9900[CWT]|r " .. L.MSG_LOCKED)
-    else
-        print("|cffff9900[CWT]|r " .. L.MSG_UNLOCKED)
-    end
-end)
-
--- ============================================================
---  Tooltip hint
--- ============================================================
-CWT:SetScript("OnEnter", function(self)
-    if not CWTDB then return end
-    GameTooltip:SetOwner(self, "ANCHOR_TOP")
-    GameTooltip:ClearLines()
-    if CWTDB.locked then
-        GameTooltip:AddLine(L.TT_UNLOCK, 0.8, 0.8, 0.8)
-    else
-        GameTooltip:AddLine(L.TT_DRAG, 0.8, 0.8, 0.8)
-        GameTooltip:AddLine(L.TT_LOCK, 0.8, 0.8, 0.8)
-    end
-    GameTooltip:Show()
-end)
-CWT:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
 -- ============================================================
 --  Show / Hide helpers
 -- ============================================================
-local function ShowWarning()
-    UpdateWarnActive()
-    if warnActive then CWT:Show() end
+local previewMode = false
+
+local function Show()
+    if not frame:IsShown() then
+        frame:Show()
+    end
 end
 
-local function HideWarning()
+local function Hide()
     previewMode = false
-    warnActive  = false
-    CWT:Hide()
+    frame:Hide()
 end
 
 -- ============================================================
---  Expiry warning timer
+--  Ticker — checks conditions every TICK_INTERVAL seconds
+--  This is the authoritative driver. Simple and reliable.
 -- ============================================================
-local expiryTimer = nil
+local ticker = nil
 
-local function CancelExpiryTimer()
-    if expiryTimer then expiryTimer:Cancel(); expiryTimer = nil end
-end
-
-local function ScheduleExpiryTimer()
-    CancelExpiryTimer()
-    local rem = CoachingRemaining()
-    if rem <= WARN_THRESHOLD then return end
-    local delay = rem - WARN_THRESHOLD
-    expiryTimer = C_Timer.NewTimer(delay, function()
-        expiryTimer = nil
-        UpdateWarnActive()
-        if warnActive then ShowWarning() end
+local function StartTicker()
+    if ticker then return end
+    ticker = C_Timer.NewTicker(TICK_INTERVAL, function()
+        if previewMode then return end
+        if ShouldWarn() then
+            Show()
+        else
+            if frame:IsShown() then Hide() end
+        end
     end)
 end
 
+local function StopTicker()
+    if ticker then ticker:Cancel(); ticker = nil end
+end
+
 -- ============================================================
---  Evaluate: called after every relevant state change
---  This is the ONLY place API calls happen; never inside OnUpdate.
+--  Drag support (for /cwt config)
 -- ============================================================
-local function Evaluate()
-    UpdateWarnActive()
-    if warnActive then
-        CancelExpiryTimer()
-        ShowWarning()
-    else
-        local rem = CoachingRemaining()
-        if rem > WARN_THRESHOLD then
-            HideWarning()
-            ScheduleExpiryTimer()
-        else
-            HideWarning()
+local function EnableDrag()
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function(self) self:StartMoving() end)
+    frame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        if CWTDB then
+            local x, y   = self:GetCenter()
+            local cx, cy = UIParent:GetCenter()
+            CWTDB.posX = x - cx
+            CWTDB.posY = y - cy
         end
+        print("|cffff9900[CWT]|r Position saved.")
+    end)
+end
+
+local function DisableDrag()
+    frame:SetMovable(false)
+    frame:EnableMouse(false)
+    frame:SetScript("OnDragStart", nil)
+    frame:SetScript("OnDragStop",  nil)
+end
+
+-- ============================================================
+--  Settings panel
+-- ============================================================
+local CWTCategory
+
+local function BuildSettingsCanvas()
+    local W     = 600
+    local PAD   = 20
+    local BTN_H = 26
+    local HALF_W = math.floor((W - PAD * 2 - 8) / 2)
+    local y     = -10
+
+    local outer = CreateFrame("Frame")
+    outer:SetSize(W, 300)
+    outer:Hide()
+
+    local scrollFrame = CreateFrame("ScrollFrame", "CWTSettingsScroll", outer, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT",     outer, "TOPLEFT",      0,   0)
+    scrollFrame:SetPoint("BOTTOMRIGHT", outer, "BOTTOMRIGHT", -26,  0)
+
+    local canvas = CreateFrame("Frame", nil, scrollFrame)
+    canvas:SetSize(W - 30, 400)
+    scrollFrame:SetScrollChild(canvas)
+
+    local function addGap(px) y = y - px end
+
+    local hdr = canvas:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    hdr:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD, y)
+    hdr:SetText("Position")
+    addGap(26)
+
+    local showBtn  = CreateFrame("Button", nil, canvas, "UIPanelButtonTemplate")
+    showBtn:SetSize(HALF_W, BTN_H)
+    showBtn:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD, y)
+    showBtn:SetText("Show Warning")
+
+    local hideBtn  = CreateFrame("Button", nil, canvas, "UIPanelButtonTemplate")
+    hideBtn:SetSize(HALF_W, BTN_H)
+    hideBtn:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD + HALF_W + 8, y)
+    hideBtn:SetText("Hide Warning")
+    addGap(BTN_H + 8)
+
+    local dragBtn  = CreateFrame("Button", nil, canvas, "UIPanelButtonTemplate")
+    dragBtn:SetSize(HALF_W, BTN_H)
+    dragBtn:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD, y)
+    dragBtn:SetText("Drag to Reposition")
+
+    local resetBtn = CreateFrame("Button", nil, canvas, "UIPanelButtonTemplate")
+    resetBtn:SetSize(HALF_W, BTN_H)
+    resetBtn:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD + HALF_W + 8, y)
+    resetBtn:SetText("Reset Position")
+    addGap(BTN_H + 24)
+
+    local sep = canvas:CreateTexture(nil, "ARTWORK")
+    sep:SetColorTexture(0.3, 0.3, 0.3, 0.5)
+    sep:SetPoint("TOPLEFT",  canvas, "TOPLEFT",  PAD,  y)
+    sep:SetPoint("TOPRIGHT", canvas, "TOPRIGHT", -PAD, y)
+    sep:SetHeight(1)
+    addGap(14)
+
+    local function fline(text, indent)
+        local fs = canvas:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        fs:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD + (indent or 0), y)
+        fs:SetTextColor(0.72, 0.72, 0.72, 1)
+        fs:SetText(text)
+        addGap(18)
+    end
+    fline("|cFFFFD700Jeremy-Gstein|r  \226\128\148  CWT - Coach's Whistle Tracker")
+    fline("|cFFFFD700DoNotRelease|r \226\128\148  |cFF4DA6FF[Seems-Good/DNR]|r", 8)
+    fline("|cFFFFD700HunterHomieReminder|r \226\128\148  |cFF4DA6FF[Jeremy-Gstein/HunterHomieReminder]|r", 8)
+
+    if SettingsPanel then
+        SettingsPanel:HookScript("OnHide", function()
+            DisableDrag()
+            if not ShouldWarn() then Hide() end
+        end)
+    end
+
+    showBtn:SetScript("OnClick",  function() previewMode = true;  Show() end)
+    hideBtn:SetScript("OnClick",  function() DisableDrag(); Hide() end)
+    dragBtn:SetScript("OnClick",  function()
+        previewMode = true
+        Show()
+        EnableDrag()
+        print("|cffff9900[CWT]|r Drag the warning into position, then click Hide.")
+    end)
+    resetBtn:SetScript("OnClick", function()
+        if not CWTDB then return end
+        CWTDB.posX, CWTDB.posY = 0, 120
+        frame:ClearAllPoints()
+        frame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+        print("|cffff9900[CWT]|r Position reset.")
+    end)
+
+    return outer
+end
+
+local function RegisterSettings()
+    if not (Settings and Settings.RegisterCanvasLayoutCategory) then return end
+    local canvas = BuildSettingsCanvas()
+    CWTCategory = Settings.RegisterCanvasLayoutCategory(canvas, "CWT - Coach's Whistle Tracker")
+    Settings.RegisterAddOnCategory(CWTCategory)
+end
+
+local function OpenConfig()
+    if CWTCategory and Settings and Settings.OpenToCategory then
+        Settings.OpenToCategory(CWTCategory:GetID())
     end
 end
 
 -- ============================================================
---  Events
+--  Events  (purely for responsiveness — ticker is the driver)
 -- ============================================================
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("PLAYER_LOGIN")
-eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("PLAYER_REGEN_DISABLED")   -- combat start  → hide
-eventFrame:RegisterEvent("PLAYER_REGEN_ENABLED")    -- combat end    → re-evaluate
-eventFrame:RegisterEvent("UNIT_AURA")               -- buff change   → re-evaluate
-eventFrame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")-- equip change  → re-check trinket
-eventFrame:RegisterEvent("GROUP_ROSTER_UPDATE")     -- group join/leave → re-evaluate
-eventFrame:RegisterEvent("PET_BATTLE_OPENING_START")
-eventFrame:RegisterEvent("PET_BATTLE_CLOSE")
+local events = CreateFrame("Frame")
+events:RegisterEvent("ADDON_LOADED")
+events:RegisterEvent("PLAYER_LOGIN")
+events:RegisterEvent("PLAYER_ENTERING_WORLD")
+events:RegisterEvent("PLAYER_REGEN_DISABLED")   -- combat start → hide fast
+events:RegisterEvent("PET_BATTLE_OPENING_START")
 
-eventFrame:SetScript("OnEvent", function(self, event, arg1)
+events:SetScript("OnEvent", function(self, event, arg1)
 
-    -- ── DB init ──────────────────────────────────────────────
-    if event == "ADDON_LOADED" and arg1 == addonName then
+    if event == "ADDON_LOADED" and arg1 == "CWT" then
         self:UnregisterEvent("ADDON_LOADED")
-        if not CWTDB then
-            CWTDB = { posX = 0, posY = 120, locked = false }
-        end
-        local db = CWTDB
-        if db.posX   == nil then db.posX   = 0     end
-        if db.posY   == nil then db.posY   = 120   end
-        if db.locked == nil then db.locked = false  end
-        CWT:ClearAllPoints()
-        CWT:SetPoint("CENTER", UIParent, "CENTER", db.posX, db.posY)
+        CWTDB = CWTDB or {}
+        if CWTDB.posX == nil then CWTDB.posX = 0   end
+        if CWTDB.posY == nil then CWTDB.posY = 120  end
+        frame:ClearAllPoints()
+        frame:SetPoint("CENTER", UIParent, "CENTER", CWTDB.posX, CWTDB.posY)
+        RegisterSettings()
         return
     end
 
-    -- ── Login: inventory ready ───────────────────────────────
     if event == "PLAYER_LOGIN" then
-        inGroup  = IsInGroup()
-        RefreshEquipped()
-        -- Delay slightly so auras are fully populated before we check
-        C_Timer.After(1.5, function()
-            inGroup = IsInGroup()
-            RefreshCoachingAura()
-            Evaluate()
-        end)
+        -- Start the ticker once the player is fully in
+        C_Timer.After(2, StartTicker)
         return
     end
 
-    -- ── Zone change / reload UI ──────────────────────────────
     if event == "PLAYER_ENTERING_WORLD" then
-        inGroup  = false
-        coachingExpiry = 0
-        warnActive = false
-        CancelExpiryTimer()
-        HideWarning()
-        C_Timer.After(1.5, function()
-            inGroup  = IsInGroup()
-            RefreshEquipped()
-            RefreshCoachingAura()
-            Evaluate()
-        end)
+        Hide()
+        -- Give the world 2s to settle before resuming checks
+        StopTicker()
+        C_Timer.After(2, StartTicker)
         return
     end
 
-    -- ── Pet battle ───────────────────────────────────────────
-    if event == "PET_BATTLE_OPENING_START" then
-        HideWarning()
+    -- Instant hide on combat start — don't wait for next tick
+    if event == "PLAYER_REGEN_DISABLED" or event == "PET_BATTLE_OPENING_START" then
+        Hide()
         return
     end
-
-    -- ── Entered combat ───────────────────────────────────────
-    if event == "PLAYER_REGEN_DISABLED" then
-        CancelExpiryTimer()
-        HideWarning()
-        return
-    end
-
-    -- ── Equipment change ─────────────────────────────────────
-    if event == "PLAYER_EQUIPMENT_CHANGED" then
-        RefreshEquipped()
-        Evaluate()
-        return
-    end
-
-    -- ── Aura change — only care about player ─────────────────
-    if event == "UNIT_AURA" then
-        if arg1 ~= "player" then return end
-        RefreshCoachingAura()  -- update cached expiry timestamp
-        Evaluate()
-        return
-    end
-
-    -- ── Left combat ──────────────────────────────────────────
-    -- ── Group change — debounced ──────────────────────────────
-    if event == "GROUP_ROSTER_UPDATE" then
-        inGroup = IsInGroup()
-    end
-
-    -- ── Everything else (PLAYER_REGEN_ENABLED, PET_BATTLE_CLOSE, etc.) ─
-    Evaluate()
 end)
 
 -- ============================================================
---  Slash commands
+--  Slash
 -- ============================================================
 SLASH_CWT1 = "/cwt"
 SlashCmdList["CWT"] = function(msg)
     local cmd = strtrim(msg or ""):lower()
 
     if cmd == "config" then
-        -- Show the warning as a preview so the user can drag it into place.
-        -- Right-clicking locks it and ends the preview.
-        if CWTDB then
-            CWTDB.locked = false
-        end
-        previewMode = true
-        CWT:Show()
-        print("|cffff9900[CWT]|r " .. L.SLASH_CONFIG_MSG)
+        OpenConfig()
 
     elseif cmd == "debug" then
-        local rem = CoachingRemaining()
-        print("|cffff9900[CWT Debug]|r " .. L.DBG_HEADER)
-        print(L.DBG_EQUIPPED .. tostring(whistleEquipped))
-        print(L.DBG_COMBAT .. tostring(InCombatLockdown()))
-        print(L.DBG_REMAINING .. string.format("%.0f", rem) .. L.DBG_REMAINING_UNIT)
-        print(L.DBG_WARN .. tostring(warnActive))
-        print(L.DBG_VISIBLE .. tostring(CWT:IsShown()))
-        print(L.DBG_LOCKED .. tostring(CWTDB and CWTDB.locked))
+        local data = C_UnitAuras.GetPlayerAuraBySpellID(SPELL_COACHING)
+        local rem  = 0
+        if data and data.expirationTime and data.expirationTime > 0 then
+            rem = math.max(0, data.expirationTime - GetTime())
+        end
+        print("|cffff9900[CWT Debug]|r ---")
+        print("  equipped  = " .. tostring(WhistleEquipped()))
+        print("  inCombat  = " .. tostring(InCombatLockdown()))
+        print("  inGroup   = " .. tostring(IsInGroup()))
+        print("  buffOK    = " .. tostring(CoachingBuffOK()))
+        print("  remaining = " .. string.format("%.0f", rem) .. "s")
+        print("  ShouldWarn= " .. tostring(ShouldWarn()))
+        print("  visible   = " .. tostring(frame:IsShown()))
+        print("  ticker    = " .. tostring(ticker ~= nil))
 
     else
-        print("|cffff9900[CWT]|r " .. L.SLASH_HELP_CONFIG)
-        print("|cffff9900[CWT]|r " .. L.SLASH_HELP_DEBUG)
+        print("|cffff9900[CWT]|r /cwt config  —  open settings")
+        print("|cffff9900[CWT]|r /cwt debug   —  print state")
     end
 end

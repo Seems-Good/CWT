@@ -10,5 +10,4 @@
 ## X-Website: https://github.com/Seems-Good/CWT
 ## X-Curse-Project-ID: 1491524 
 
-Locale/enUS.lua
 CWT.lua
