@@ -21,7 +21,7 @@ local SPELL_COACHING = 389581   -- Coaching buff
 local TRINKET_1      = 13
 local TRINKET_2      = 14
 local WARN_SECS      = 300      -- warn if buff < 5 min remaining
-local TICK_INTERVAL  = 2        -- how often to re-check conditions (seconds)
+local TICK_INTERVAL  = 30       -- safety-net fallback only; events handle real-time response
 local SOUND_ID       = 204190   -- slide whistle
 
 -- Pulse settings
@@ -231,8 +231,8 @@ local function BuildSettingsCanvas()
         addGap(18)
     end
     fline("|cFFFFD700Jeremy-Gstein|r  \226\128\148  CWT - Coach's Whistle Tracker")
-    fline("|cFFFFD700DoNotRelease|r \226\128\148  |cFF4DA6FF[Seems-Good/DNR]|r", 8)
-    fline("|cFFFFD700HunterHomieReminder|r \226\128\148  |cFF4DA6FF[Jeremy-Gstein/HunterHomieReminder]|r", 8)
+    fline("|cFFFFD700Github:|r \226\128\148  |cFF4DA6FF[https://github.com/Seems-Good/CWT]|r", 8)
+    fline("|cFFFFD700Guild Website:|r \226\128\148  |cFF4DA6FF[https://seemsgood.org]|r", 8)
 
     if SettingsPanel then
         SettingsPanel:HookScript("OnHide", function()
@@ -274,17 +274,26 @@ local function OpenConfig()
 end
 
 -- ============================================================
---  Events  (purely for responsiveness — ticker is the driver)
+--  Events  — instant response for all known state changes.
+--  Ticker (30s) is only a safety net for anything we miss.
 -- ============================================================
+local rosterPending = false  -- debounce GROUP_ROSTER_UPDATE burst
+
 local events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
-events:RegisterEvent("PLAYER_REGEN_DISABLED")   -- combat start → hide fast
+events:RegisterEvent("PLAYER_REGEN_DISABLED")    -- entered combat  → hide now
+events:RegisterEvent("PLAYER_REGEN_ENABLED")     -- left combat     → check now
+events:RegisterEvent("UNIT_AURA")                -- buff gained/lost → check now
+events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED") -- trinket swap    → check now
+events:RegisterEvent("GROUP_ROSTER_UPDATE")      -- joined/left group → check now
 events:RegisterEvent("PET_BATTLE_OPENING_START")
+events:RegisterEvent("PET_BATTLE_CLOSE")
 
 events:SetScript("OnEvent", function(self, event, arg1)
 
+    -- ── One-time DB + settings init ──────────────────────────
     if event == "ADDON_LOADED" and arg1 == "CWT" then
         self:UnregisterEvent("ADDON_LOADED")
         CWTDB = CWTDB or {}
@@ -296,25 +305,54 @@ events:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
+    -- ── First login: let world settle, then start safety-net ticker ──
     if event == "PLAYER_LOGIN" then
-        -- Start the ticker once the player is fully in
-        C_Timer.After(2, StartTicker)
+        C_Timer.After(2, function()
+            if ShouldWarn() then Show() end
+            StartTicker()
+        end)
         return
     end
 
+    -- ── Zone change / reload: reset everything ───────────────
     if event == "PLAYER_ENTERING_WORLD" then
         Hide()
-        -- Give the world 2s to settle before resuming checks
         StopTicker()
-        C_Timer.After(2, StartTicker)
+        C_Timer.After(2, function()
+            if ShouldWarn() then Show() end
+            StartTicker()
+        end)
         return
     end
 
-    -- Instant hide on combat start — don't wait for next tick
+    -- ── Combat start: hide immediately ───────────────────────
     if event == "PLAYER_REGEN_DISABLED" or event == "PET_BATTLE_OPENING_START" then
         Hide()
         return
     end
+
+    -- ── Aura update: only care about the player ───────────────
+    -- Fires when Coaching buff is applied or removed.
+    if event == "UNIT_AURA" then
+        if arg1 ~= "player" then return end
+        if ShouldWarn() then Show() else Hide() end
+        return
+    end
+
+    -- ── Group roster: debounce the burst of events ────────────
+    if event == "GROUP_ROSTER_UPDATE" then
+        if rosterPending then return end
+        rosterPending = true
+        C_Timer.After(0.5, function()
+            rosterPending = false
+            if ShouldWarn() then Show() else Hide() end
+        end)
+        return
+    end
+
+    -- ── Everything else: left combat, equipment changed,
+    --    pet battle closed — just re-evaluate immediately ──────
+    if ShouldWarn() then Show() else Hide() end
 end)
 
 -- ============================================================

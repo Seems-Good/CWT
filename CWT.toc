@@ -1,5 +1,5 @@
 ## Interface: 120000, 120001
-## Version: 1.0.0
+## Version: 1.0.1
 ## Title: CWT - Coach's Whistle Tracker
 ## Notes: Simple reminder to use your Emerald Coach's Whistle when out of combat without the Coaching buff.
 ## Author: Jeremy-Gstein
