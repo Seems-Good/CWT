@@ -61,7 +61,19 @@ end
 
 local function CoachingBuffOK()
     local data = C_UnitAuras.GetPlayerAuraBySpellID(SPELL_COACHING)
-    if not data then return false end
+    if not data then
+        -- GetPlayerAuraBySpellID returns nil both when the buff is genuinely
+        -- absent AND when aura data is restricted in an active M+ key (even
+        -- between pulls). We cannot distinguish the two from nil alone.
+        -- Safe default: if a M+ key is active, assume the buff is present to
+        -- avoid a false-positive warning. We will catch the real absence once
+        -- the key ends or via the UNIT_AURA event when the buff actually drops.
+        if C_ChallengeMode and C_ChallengeMode.IsChallengeModeActive
+           and C_ChallengeMode.IsChallengeModeActive() then
+            return true
+        end
+        return false
+    end
     if not data.expirationTime or data.expirationTime == 0 then return true end
     return (data.expirationTime - GetTime()) >= WARN_SECS
 end
@@ -374,9 +386,9 @@ local function BuildSettingsCanvas()
         fs:SetText(text)
         addGap(18)
     end
-    fline("CWT - Coach's Whistle Tracker")
+    fline("|cFFFFD700Jeremy-Gstein|r  \226\128\148  CWT - Coach's Whistle Tracker")
     fline("|cFFFFD700Github:|r  |cFF4DA6FF[https://github.com/Seems-Good/CWT]|r", 8)
-    fline("|cFFFFD700Guild Website:|r   |cFF4DA6FF[https://seemsgood.org]|r", 8)
+    fline("|cFFFFD700Guild:|r   |cFF4DA6FF[https://seemsgood.org]|r", 8)
 
     -- ── Sync panel on open ────────────────────────────────────
     outer:SetScript("OnShow", function()
@@ -437,7 +449,7 @@ end
 local function RegisterSettings()
     if not (Settings and Settings.RegisterCanvasLayoutCategory) then return end
     local canvas = BuildSettingsCanvas()
-    CWTCategory = Settings.RegisterCanvasLayoutCategory(canvas, "Coach's Whistle Tracker")
+    CWTCategory = Settings.RegisterCanvasLayoutCategory(canvas, "CWT - Coach's Whistle Tracker")
     Settings.RegisterAddOnCategory(CWTCategory)
 end
 
