@@ -4,6 +4,7 @@
 --   • Emerald Coach's Whistle equipped in trinket slot 13 or 14
 --   • NOT in combat
 --   • In a group or raid
+--   • Inside a raid, dungeon, or Mythic+ instance
 --   • No Coaching buff (or buff expiring in < 5 min)
 --
 -- /cwt  — open settings
@@ -86,12 +87,21 @@ local function AuraAccessRestricted()
     return InCombatLockdown()
 end
 
+-- Returns true only when inside a raid, dungeon, or Mythic+ instance.
+-- instanceType == "party"  covers normal/heroic dungeons and Mythic+
+-- instanceType == "raid"   covers all raid difficulties
+local function InInstanceContent()
+    local inInstance, instanceType = IsInInstance()
+    return inInstance and (instanceType == "raid" or instanceType == "party")
+end
+
 local function ShouldWarn()
-    if not WhistleEquipped()  then return false end
-    if InCombatLockdown()     then return false end
-    if not IsInGroup()        then return false end
-    if AuraAccessRestricted() then return false end
-    if CoachingBuffOK()       then return false end
+    if not WhistleEquipped()   then return false end
+    if InCombatLockdown()      then return false end
+    if not IsInGroup()         then return false end
+    if not InInstanceContent() then return false end
+    if AuraAccessRestricted()  then return false end
+    if CoachingBuffOK()        then return false end
     return true
 end
 
@@ -210,17 +220,19 @@ local function PrintDebug()
     if data and data.expirationTime and data.expirationTime > 0 then
         rem = math.max(0, data.expirationTime - GetTime())
     end
+    local inInst, instType = IsInInstance()
     print("|cffff9900[CWT Debug]|r ---")
-    print("  equipped   = " .. tostring(WhistleEquipped()))
-    print("  inCombat   = " .. tostring(InCombatLockdown()))
-    print("  inGroup    = " .. tostring(IsInGroup()))
-    print("  buffOK     = " .. tostring(CoachingBuffOK()))
-    print("  remaining  = " .. string.format("%.0f", rem) .. "s")
-    print("  ShouldWarn = " .. tostring(ShouldWarn()))
-    print("  visible    = " .. tostring(frame:IsShown()))
-    print("  muted      = " .. tostring(CWTDB and CWTDB.muted))
-    print("  fontSize   = " .. tostring(CWTDB and CWTDB.fontSize))
-    print("  ticker     = " .. tostring(ticker ~= nil))
+    print("  equipped    = " .. tostring(WhistleEquipped()))
+    print("  inCombat    = " .. tostring(InCombatLockdown()))
+    print("  inGroup     = " .. tostring(IsInGroup()))
+    print("  inInstance  = " .. tostring(inInst) .. "  (" .. tostring(instType) .. ")")
+    print("  buffOK      = " .. tostring(CoachingBuffOK()))
+    print("  remaining   = " .. string.format("%.0f", rem) .. "s")
+    print("  ShouldWarn  = " .. tostring(ShouldWarn()))
+    print("  visible     = " .. tostring(frame:IsShown()))
+    print("  muted       = " .. tostring(CWTDB and CWTDB.muted))
+    print("  fontSize    = " .. tostring(CWTDB and CWTDB.fontSize))
+    print("  ticker      = " .. tostring(ticker ~= nil))
 end
 
 -- ============================================================
