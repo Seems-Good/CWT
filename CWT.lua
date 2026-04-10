@@ -28,18 +28,20 @@ local COLOR_PRESETS = {
     { label = "Red",    r = 1.0, g = 0.15, b = 0.15 },
     { label = "Orange", r = 1.0, g = 0.55, b = 0.0  },
     { label = "Yellow", r = 1.0, g = 1.0,  b = 0.0  },
+    { label = "Green",  r = 0.0, g = 1.0,  b = 0.2  },
     { label = "White",  r = 1.0, g = 1.0,  b = 1.0  },
     { label = "Cyan",   r = 0.0, g = 1.0,  b = 1.0  },
 }
 
 local DB_DEFAULTS = {
-    posX     = 0,
-    posY     = 120,
-    fontSize = 46,
-    colorR   = 1.0,
-    colorG   = 0.15,
-    colorB   = 0.15,
-    muted    = false,
+    posX         = 0,
+    posY         = 120,
+    fontSize     = 46,
+    colorR       = 1.0,
+    colorG       = 0.15,
+    colorB       = 0.15,
+    muted        = false,
+    instanceOnly = true,
 }
 
 -- Pulse
@@ -96,12 +98,12 @@ local function InInstanceContent()
 end
 
 local function ShouldWarn()
-    if not WhistleEquipped()   then return false end
-    if InCombatLockdown()      then return false end
-    if not IsInGroup()         then return false end
-    if not InInstanceContent() then return false end
-    if AuraAccessRestricted()  then return false end
-    if CoachingBuffOK()        then return false end
+    if not WhistleEquipped()  then return false end
+    if InCombatLockdown()     then return false end
+    if not IsInGroup()        then return false end
+    if CWTDB and CWTDB.instanceOnly and not InInstanceContent() then return false end
+    if AuraAccessRestricted() then return false end
+    if CoachingBuffOK()       then return false end
     return true
 end
 
@@ -370,6 +372,21 @@ local function BuildSettingsCanvas()
     addGap(math.ceil(#COLOR_PRESETS / 2) * (BTN_H + 4) + 18)
     divider()
 
+    -- ── Instance Only ─────────────────────────────────────────
+    sectionHeader("Visibility")
+
+    local instanceCB = CreateFrame("CheckButton", "CWTInstanceCB", canvas, "UICheckButtonTemplate")
+    instanceCB:SetPoint("TOPLEFT", canvas, "TOPLEFT", PAD - 2, y)
+    CWTInstanceCBText:SetText("Show only inside instances (raids, dungeons, Mythic+)")
+    CWTInstanceCBText:SetFontObject("GameFontNormal")
+    instanceCB:SetScript("OnClick", function(self)
+        if not CWTDB then return end
+        CWTDB.instanceOnly = self:GetChecked()
+        if ShouldWarn() then Show() else Hide() end
+    end)
+    addGap(BTN_H + 18)
+    divider()
+
     -- ── Sound ─────────────────────────────────────────────────
     sectionHeader("Sound")
 
@@ -398,9 +415,13 @@ local function BuildSettingsCanvas()
         fs:SetText(text)
         addGap(18)
     end
-    fline("|cFFFFD700Jeremy-Gstein|r  \226\128\148  CWT - Coach's Whistle Tracker")
+    fline("|cFFFFD700CWT - Coach's Whistle Tracker|r")
+    fline("|cFFFFD700/cwt|r - Opens Options/Settings Menu", 8)
     fline("|cFFFFD700Github:|r  |cFF4DA6FF[https://github.com/Seems-Good/CWT]|r", 8)
     fline("|cFFFFD700Guild:|r   |cFF4DA6FF[https://seemsgood.org]|r", 8)
+
+    -- Trim canvas to actual content so there's no dead scroll space
+    canvas:SetHeight(-y + PAD)
 
     -- ── Sync panel on open ────────────────────────────────────
     outer:SetScript("OnShow", function()
@@ -410,6 +431,7 @@ local function BuildSettingsCanvas()
         sizeSlider:SetValue(sz)
         refreshSize(sz)
         ApplyMuteLabel()
+        instanceCB:SetChecked(CWTDB.instanceOnly ~= false)
     end)
 
     -- Close settings → stop drag preview
@@ -461,7 +483,7 @@ end
 local function RegisterSettings()
     if not (Settings and Settings.RegisterCanvasLayoutCategory) then return end
     local canvas = BuildSettingsCanvas()
-    CWTCategory = Settings.RegisterCanvasLayoutCategory(canvas, "CWT - Coach's Whistle Tracker")
+    CWTCategory = Settings.RegisterCanvasLayoutCategory(canvas, "Coach's Whistle Tracker")
     Settings.RegisterAddOnCategory(CWTCategory)
 end
 
