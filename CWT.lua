@@ -1,11 +1,10 @@
--- CWT.lua  —  CWT - Coach's Whistle Tracker
---
+-- CWT.lua  
 -- Shows "USE COACH'S WHISTLE" when:
---   • Emerald Coach's Whistle equipped in trinket slot 13 or 14
---   • NOT in combat
---   • In a group or raid
---   • Inside a raid, dungeon, or Mythic+ instance
---   • No Coaching buff (or buff expiring in < 5 min)
+--   - Emerald Coach's Whistle equipped in trinket slot 13 or 14
+--   - NOT in combat
+--   - In a group or raid
+--   - Inside a raid, dungeon, or Mythic+ instance
+--   - No Coaching buff (or buff expiring in < 5 min)
 --
 -- /cwt  — open settings
 
@@ -187,6 +186,45 @@ local function StopTicker()
 end
 
 -- ============================================================
+--  Event gating
+--  Only four events are registered at all times:
+--    ADDON_LOADED            — one-shot DB + settings init
+--    PLAYER_LOGIN            — initial equipment check
+--    PLAYER_ENTERING_WORLD   — zone-change equipment check
+--    PLAYER_EQUIPMENT_CHANGED — equip/unequip gate
+--
+--  Everything else (combat, auras, roster, pet battle) lives
+--  in TRACKED_EVENTS and is only registered via EnableTracking()
+--  when the trinket is equipped. Characters without the whistle
+--  pay zero per-event CPU cost after login.
+-- ============================================================
+local TRACKED_EVENTS = {
+    "PLAYER_REGEN_DISABLED",
+    "PLAYER_REGEN_ENABLED",
+    "UNIT_AURA",
+    "GROUP_ROSTER_UPDATE",
+    "PET_BATTLE_OPENING_START",
+    "PET_BATTLE_CLOSE",
+}
+
+local trackingActive = false
+
+local function EnableTracking()
+    if trackingActive then return end
+    trackingActive = true
+    for _, e in ipairs(TRACKED_EVENTS) do events:RegisterEvent(e) end
+    StartTicker()
+end
+
+local function DisableTracking()
+    if not trackingActive then return end
+    trackingActive = false
+    for _, e in ipairs(TRACKED_EVENTS) do events:UnregisterEvent(e) end
+    StopTicker()
+    Hide()
+end
+
+-- ============================================================
 --  Drag
 -- ============================================================
 local function EnableDrag()
@@ -235,6 +273,7 @@ local function PrintDebug()
     print("  muted       = " .. tostring(CWTDB and CWTDB.muted))
     print("  fontSize    = " .. tostring(CWTDB and CWTDB.fontSize))
     print("  ticker      = " .. tostring(ticker ~= nil))
+    print("  tracking    = " .. tostring(trackingActive))
 end
 
 -- ============================================================
@@ -495,20 +534,24 @@ end
 
 -- ============================================================
 --  Events
+--  Only four events are registered at all times:
+--    ADDON_LOADED            — one-shot DB + settings init
+--    PLAYER_LOGIN            — initial equipment check
+--    PLAYER_ENTERING_WORLD   — zone-change equipment check
+--    PLAYER_EQUIPMENT_CHANGED — equip/unequip gate
+--
+--  Everything else (combat, auras, roster, pet battle) lives
+--  in TRACKED_EVENTS and is only registered via EnableTracking()
+--  when the trinket is equipped. Characters without the whistle
+--  pay zero per-event CPU cost after login.
 -- ============================================================
 local rosterPending = false
 
-local events = CreateFrame("Frame")
+events = CreateFrame("Frame")
 events:RegisterEvent("ADDON_LOADED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_ENTERING_WORLD")
-events:RegisterEvent("PLAYER_REGEN_DISABLED")
-events:RegisterEvent("PLAYER_REGEN_ENABLED")
-events:RegisterEvent("UNIT_AURA")
 events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
-events:RegisterEvent("GROUP_ROSTER_UPDATE")
-events:RegisterEvent("PET_BATTLE_OPENING_START")
-events:RegisterEvent("PET_BATTLE_CLOSE")
 
 events:SetScript("OnEvent", function(self, event, arg1)
 
@@ -527,21 +570,38 @@ events:SetScript("OnEvent", function(self, event, arg1)
 
     if event == "PLAYER_LOGIN" then
         C_Timer.After(2, function()
-            if ShouldWarn() then Show() end
-            StartTicker()
+            if WhistleEquipped() then
+                EnableTracking()
+                if ShouldWarn() then Show() end
+            end
         end)
         return
     end
 
     if event == "PLAYER_ENTERING_WORLD" then
+        -- Always hide on zone change; deferred check re-shows if needed.
         Hide()
-        StopTicker()
+        DisableTracking()
         C_Timer.After(2, function()
-            if ShouldWarn() then Show() end
-            StartTicker()
+            if WhistleEquipped() then
+                EnableTracking()
+                if ShouldWarn() then Show() end
+            end
         end)
         return
     end
+
+    if event == "PLAYER_EQUIPMENT_CHANGED" then
+        if WhistleEquipped() then
+            EnableTracking()
+            if ShouldWarn() then Show() end
+        else
+            DisableTracking()
+        end
+        return
+    end
+
+    -- ── Everything below only fires when tracking is active ──
 
     if event == "PLAYER_REGEN_DISABLED" or event == "PET_BATTLE_OPENING_START" then
         Hide()
@@ -567,6 +627,8 @@ events:SetScript("OnEvent", function(self, event, arg1)
         return
     end
 
+    -- PLAYER_REGEN_ENABLED, PET_BATTLE_CLOSE, and any future
+    -- tracked events fall through to here.
     if ShouldWarn() then Show() else Hide() end
 end)
 
